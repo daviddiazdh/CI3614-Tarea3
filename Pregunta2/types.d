@@ -26,6 +26,12 @@ struct Hole {
     size_t end;   // Exclusivo
 }
 
+size_t alignTo(size_t x, size_t a)
+{
+    // Alineación genérica
+    return ((x + a - 1) / a) * a;
+}
+
 bool is_type_list_valid(string[] type_list, TypeSum[string] types){
     foreach (x; type_list){
         if(!(x in types)){
@@ -125,6 +131,35 @@ int gcd(int x, int y){
     return x;
 }
 
+int[] not_packed_method_for_layout(string[] types, TypeSum[string] global_types){
+    TypeSum[] ordered;
+    foreach(name; types) ordered ~= global_types[name];
+
+    Hole[] holes;
+    size_t struct_size = 0;
+
+    PlacedType[] result;
+    foreach(ts; ordered){
+        
+        size_t aligned = alignTo(struct_size, ts.alignment);
+
+        result ~= PlacedType(ts.name, ts, aligned);
+
+        if (aligned > struct_size)
+            holes ~= Hole(struct_size, aligned);
+
+        struct_size = aligned + ts.size;
+    }
+
+    size_t total_size = struct_size;
+    size_t wasted_bytes = 0;
+    foreach (h; holes)
+        wasted_bytes += (h.end - h.start);
+    
+    return [to!int(wasted_bytes), to!int(total_size)];
+
+}  
+
 void get_type_description(string name, TypeSum[string] types){
     if(!(name in types)){
         writeln("El tipo ", name, " no existe.");
@@ -158,10 +193,19 @@ void get_type_description(string name, TypeSum[string] types){
             writeln("El objeto '", name, "' es de tipo struct.");
             writeln("Contenido: ");
             writeln("----------------------------------------");
+            int total_size;
             foreach(type; types[name].types){
                 writeln("    ", types[type].name, " | ", types[type].size, " Bytes | ", types[type].alignment, " de alineación.");
+                total_size += types[type].size;
             }
-            
+            writeln("----------------------------------------");
+            writeln("Tamaño y desperdicio");
+
+            int[] not_packet_result = not_packed_method_for_layout(types[name].types, types);
+
+            writeln("    No empaquetado: ", not_packet_result[1], " Bytes y ", not_packet_result[0], " Bytes de desperdicio.");
+            writeln("    Empaquetado: ", total_size, " Bytes y 0 Bytes de desperdicio.");
+            writeln("    Heurística: ", types[name].size, " Bytes y ", types[name].heuristic_wasted, " Bytes desperdiciados.");
             break;
 
 
@@ -169,13 +213,8 @@ void get_type_description(string name, TypeSum[string] types){
             break;
     }
 
-}
+}         
 
-size_t alignTo(size_t x, size_t a)
-{
-    // Alineación genérica
-    return ((x + a - 1) / a) * a;
-}
 
 int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types)
 {
@@ -253,7 +292,7 @@ int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types
     foreach (h; holes)
         wasted_bytes += (h.end - h.start);
     
-    return [wasted_bytes, total_size, ordered[0].alignment];
+    return [to!int(wasted_bytes), to!int(total_size), ordered[0].alignment];
 }
 
 
@@ -268,5 +307,6 @@ void main(){
     types = create_struct_type("vector", ["int", "char", "animal"], types);
 
     get_type_description("animal", types);
+    get_type_description("vector", types);
 
 }
