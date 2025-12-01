@@ -1,10 +1,20 @@
 import std.stdio;
 import std.conv;
 import std.algorithm.sorting : sort;
-import std.algorithm.mutation : reverse;
+import std.string;
 
-enum TypeKind {Atomic, Struct, Union}
+// Define los diferentes casos de tipos de datos que 
+// se pueden simular en el programa
+enum TypeKind {
+    Atomic, 
+    Struct, 
+    Union
+}
 
+// Define la estructura donde se guardarán todos estos
+// tipos de datos, hay campos exclusivos, pero son tan pocos
+// que no vale la pena crear estructuras propias para cada uno,
+// para la legibilidad del código resulta mejor juntarlos todos
 struct TypeSum
 {   
     TypeKind kind;
@@ -15,55 +25,107 @@ struct TypeSum
     string[] types = []; // Es vacío exclusivamente cuando se trata de un tipo atómico 
 }
 
-struct PlacedType {
+TypeSum[string] global_types;
+
+// Define la estructura para los tipos ya colocados en memoria de
+// un struct, se usa para el cálculo de espacio ocupado por un struct en memoria
+struct PlacedType 
+{
     string name;
     TypeSum ts;
     size_t offset;
 }
 
-struct Hole {
+// Define los huecos de fragmentación interna de la memoria reservada para un struct,
+// es útil para el cálculo de memoria total usada por un struct y memoria desperdiciada
+struct Hole 
+{
     size_t start;
-    size_t end;   // Exclusivo
+    size_t end;
 }
 
+// Estructura para enviar respuestas de procesamiento de los comandos al
+// hilo de ejecución principal, para hacerle saber si debe finalizar, 
+// qué mensaje debe enviar y el estado del diccionario de tipos actual 
+struct OutputData
+{
+    bool exit;
+    string output;
+}
+
+// Función que intenta parsear a entero, pero al fallar lanza una excepción
+int parse_to_int(string str_num)
+{
+    int num;
+    try{
+        num = to!int(str_num);
+        if(num < 0){
+            throw new Exception("");
+        }
+        return num;
+    } catch(Exception e){
+        throw new Exception("Los argumentos tienen tipo inválido, deben ser enteros positivos.");
+    }
+}
+
+// Función que calcula el mínimo entero múltiplo de a que es mayor a x, 
+// sirve para saber la próxima posición de un tipo en memoria según alineación.
 size_t alignTo(size_t x, size_t a)
 {
-    // Alineación genérica
     return ((x + a - 1) / a) * a;
 }
 
-bool is_type_list_valid(string[] type_list, TypeSum[string] types){
+// Función que verifica que todos los tipos en una lista estén declarados previamente
+// en el diccionario general de tipos
+bool is_type_list_valid(string[] type_list)
+{
     foreach (x; type_list){
-        if(!(x in types)){
+        if(!(x in global_types)){
             return false;
         }
     }
     return true;
 }
 
-TypeSum[string] create_atomic_type(string name, int size, int alignment, TypeSum[string] types){
-    if(!(name in types)){
-        TypeSum new_type;
-        new_type.kind = TypeKind.Atomic;
-        new_type.name = name;
-        new_type.size = size;
-        new_type.alignment = alignment;
-        types[name] = new_type;
-    } else {
-        writeln("El tipo ", name, " ya existe.");
+// =============================================================================================
+// Función: create_atomic_type
+// =============================================================================================
+// Función que permite crear un tipo atómico, verifica que el tipo no exista previamente.
+// En caso de no existir aún, entonces lo agrega al diccionario de tipos general del programa
+// =============================================================================================
+void create_atomic_type(string name, int size, int alignment)
+{
+    if(name in global_types){
+        throw new Exception("El tipo " ~ name ~ " ya existe.");
     }
-    return types;
+
+    TypeSum new_type;
+    new_type.kind = TypeKind.Atomic;
+    new_type.name = name;
+    new_type.size = size;
+    new_type.alignment = alignment;
+    global_types[name] = new_type;
+    return;
 }
 
-TypeSum[string] create_struct_type(string name, string[] struct_types, TypeSum[string] types){
-    if(name in types){
-        writeln("El tipo ", name, " ya existe.");
-        return types;
+// =============================================================================================
+// Función: create_struct_type
+// =============================================================================================
+// Función que crea un elemento de tipo struct. Verifica que no existe un tipo con ese nombre.
+// En caso de no existir, entonces agrega el elemento al diccionario de tipos general, este
+// directamente debe cuantificar el tamaño y el desperdicio, pero debe escoger si lo hace sin 
+// empaquetar, empaquetando o con una heurística. En este caso, se decidió usar la heurística
+// para calcular el tamaño para que otros tipos de datos puedan usarlo.
+// La alineación que termina teniendo el tipo struct es la misma alineación que su primer bloque.
+// =============================================================================================
+void create_struct_type(string name, string[] struct_types)
+{
+    if(name in global_types){
+        throw new Exception("El tipo " ~ name ~ " ya existe.");
     }
 
-    if(!is_type_list_valid(struct_types, types)){
-        writeln("Algún tipo definido para el struct no existe.");
-        return types;
+    if(!is_type_list_valid(struct_types)){
+        throw new Exception("Algún tipo definido para el struct no existe.");
     }
 
     TypeSum new_type;
@@ -71,26 +133,33 @@ TypeSum[string] create_struct_type(string name, string[] struct_types, TypeSum[s
     new_type.name = name;
     new_type.types = struct_types;
 
-    int[] result = best_fit_heuristic_for_layout(struct_types, types);
+    int[] result = best_fit_heuristic_for_layout(struct_types);
 
     new_type.size = result[1];
     new_type.heuristic_wasted = result[0];
 
     new_type.alignment = result[2];
 
-    types[name] = new_type;
-    return types;
+    global_types[name] = new_type;
+    return;
 }
 
-TypeSum[string] create_union_type(string name, string[] union_types, TypeSum[string] types){
-    if(name in types){
-        writeln("El tipo ", name, " ya existe.");
-        return types;
+// =============================================================================================
+// Función: create_union_type
+// =============================================================================================
+// Función que crea un elemento de tipo union. Verifica que no existe un tipo con ese nombre.
+// En caso de no existir, entonces agrea este tipo al diccionario de tipos generales del programa.
+// Para el cálculo del tamaño, simplemente se queda con el tipo interno de mayor tamaño. 
+// Para la alineación, toma el mínimo común múltiplo de las alineaciones de los tipos internos.
+// =============================================================================================
+void create_union_type(string name, string[] union_types)
+{
+    if(name in global_types){
+        throw new Exception("El tipo " ~ name ~ " ya existe.");
     }
 
-    if(!is_type_list_valid(union_types, types)){
-        writeln("Algún tipo definido para la union no existe.");
-        return types;
+    if(!is_type_list_valid(union_types)){
+        throw new Exception("Algún tipo definido para la unión no existe.");
     }
 
     TypeSum new_type;
@@ -101,37 +170,46 @@ TypeSum[string] create_union_type(string name, string[] union_types, TypeSum[str
     // Calcular el tamaño de el tipo suma, en este caso, debe ser el tamaño del tipo que tiene mayor tamaño
     int max_size = 0;
     foreach(type; union_types){
-        if(types[type].kind == TypeKind.Atomic && types[type].size > max_size){
-            max_size = types[type].size;
+        if(global_types[type].size > max_size){
+            max_size = global_types[type].size;
         }
     }
 
     new_type.size = max_size;
 
-    // Calcular la alineación, constará del mínimo común múltiplo entre las alineaciones de los tipos internos
-    int union_lcm = types[union_types[0]].alignment;
+    // Calcular la alineación, será el mínimo común múltiplo entre las alineaciones de los tipos internos
+    int union_lcm = global_types[union_types[0]].alignment;
     foreach(type; union_types[1..$]){
-        union_lcm = (union_lcm / gcd(union_lcm, types[type].alignment)) * types[type].alignment;
+        union_lcm = (union_lcm / gcd(union_lcm, global_types[type].alignment)) * global_types[type].alignment;
     }
 
     new_type.alignment = union_lcm;
-    types[name] = new_type;
+    global_types[name] = new_type;
     
-    return types;
+    return;
 }
 
-int gcd(int x, int y){
-    while(x != y){
-        if(x >= y){
-            x = x - y;
-        } else{
-            y = y - x;
-        }
+
+// Función que calcula el máximo común divisor entre dos números
+int gcd(int a, int b) 
+{
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
     }
-    return x;
+    return a;
 }
 
-int[] not_packed_method_for_layout(string[] types, TypeSum[string] global_types){
+// =============================================================================================
+// Función: not_packed_method_for_layout
+// =============================================================================================
+// Función que calcula el tamaño total utilizado y la cantidad de desperdicio de un tipo struct, 
+// a través del uso de la técnica vista en la teoría de no empaquetado. Básicamente,
+// coloca los bloques de tipo en el orden declarado, respetando su alineación.
+// =============================================================================================
+int[] not_packed_method_for_layout(string[] types)
+{
     TypeSum[] ordered;
     foreach(name; types) ordered ~= global_types[name];
 
@@ -160,63 +238,88 @@ int[] not_packed_method_for_layout(string[] types, TypeSum[string] global_types)
 
 }  
 
-void get_type_description(string name, TypeSum[string] types){
-    if(!(name in types)){
-        writeln("El tipo ", name, " no existe.");
-        return;
+// =============================================================================================
+// Función: get_type_description
+// =============================================================================================
+// Función que verifica la existencia de un tipo y, en caso de existir, devuelve una 
+// descripción personalizada según si el tipo es struct, union o atómico.
+// Para el caso de struct devuelve el tamaño y el desperdicio de Bytes bajo tres enfoques distintos:
+//    1. No empaquetado
+//    2. Empaquetado
+//    3. Utilizando una heurística para intentar llegar a un caso óptimo
+// (Realmente, los compiladores utilizan la opción 3 cuando el struct está compuesto por pocos 
+//  tipos y no usan una heurística, sino un algoritmo correcto que resuelve el problema de la
+//  disposición de memoria óptimo, esto está mejor explicado en el PDF técnico). 
+// =============================================================================================
+string get_type_description(string name)
+{
+    if(!(name in global_types)){
+        throw new Exception("El tipo " ~ name ~ " no existe.");
     }
-
-    switch (types[name].kind){
+    string output = "";
+    switch (global_types[name].kind){
         case TypeKind.Atomic:
-            writeln("El objeto ", name, " es de tipo atómico.");
-            writeln("Tiene las siguientes características:");
-            writeln("Tamaño: ", types[name].size, " Bytes");
-            writeln("Alineación: ", types[name].alignment);
-            writeln("Cantidad de bytes desperdiciados en cualquier representación: 0B");
-            break;
+            output ~= "El objeto " ~ name ~ " es de tipo atómico.\n";
+            output ~= "Tiene las siguientes características:\n";
+            output ~= "Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
+            output ~= "Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
+            output ~= "Cantidad de bytes desperdiciados en cualquier representación: 0B";
+            return output;
         case TypeKind.Union:
-            writeln("El objeto '", name, "' es de tipo union.");
-            writeln("Contenido: ");
-            writeln("----------------------------------------");
-            foreach(type; types[name].types){
-                writeln("    ", types[type].name, " | ", types[type].size, " Bytes | ", types[type].alignment, " de alineación.");
+            output ~= "El objeto '" ~ name ~ "' es de tipo union.\n";
+            output ~= "Contenido: \n";
+            output ~= "----------------------------------------\n";
+            foreach(type; global_types[name].types){
+                output ~= "    " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
             }
-            writeln("----------------------------------------");
-            writeln("Tamaño: ", types[name].size, " Bytes");
-            writeln("Alineación: ", types[name].alignment);
-            writeln("Cantidad de bytes desperdiciados: Depende del tipo a tiempo de ejecución");
-            foreach(type; types[name].types){
-                writeln("    Si es ", types[type].name, ", entonces ", types[name].size - types[type].size, " Bytes.");
+            output ~= "----------------------------------------\n";
+            output ~= "Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
+            output ~= "Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
+            output ~= "Cantidad de bytes desperdiciados: Depende del tipo a tiempo de ejecución\n";
+            foreach(type; global_types[name].types){
+                output ~= "    Si es " ~ global_types[type].name ~ ", entonces " ~ to!string(global_types[name].size - global_types[type].size) ~ " Bytes.\n";
             }
-            break;
+            return output;
         case TypeKind.Struct:
-            writeln("El objeto '", name, "' es de tipo struct.");
-            writeln("Contenido: ");
-            writeln("----------------------------------------");
-            int total_size;
-            foreach(type; types[name].types){
-                writeln("    ", types[type].name, " | ", types[type].size, " Bytes | ", types[type].alignment, " de alineación.");
-                total_size += types[type].size;
+            output ~= "El objeto '" ~ name ~ "' es de tipo struct.\n";
+            output ~= "Contenido: \n";
+            output ~= "----------------------------------------\n";
+            int total_size = 0;
+            foreach(type; global_types[name].types){
+                output ~= "    " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
+                total_size += global_types[type].size;
             }
-            writeln("----------------------------------------");
-            writeln("Tamaño y desperdicio");
+            output ~= "----------------------------------------\n";
+            output ~= "Tamaño y desperdicio\n";
 
-            int[] not_packet_result = not_packed_method_for_layout(types[name].types, types);
+            int[] not_packet_result = not_packed_method_for_layout(global_types[name].types);
 
-            writeln("    No empaquetado: ", not_packet_result[1], " Bytes y ", not_packet_result[0], " Bytes de desperdicio.");
-            writeln("    Empaquetado: ", total_size, " Bytes y 0 Bytes de desperdicio.");
-            writeln("    Heurística: ", types[name].size, " Bytes y ", types[name].heuristic_wasted, " Bytes desperdiciados.");
-            break;
-
+            output ~= "    No empaquetado: " ~ to!string(not_packet_result[1]) ~ " Bytes y " ~ to!string(not_packet_result[0]) ~ " Bytes de desperdicio.\n";
+            output ~= "    Empaquetado: " ~ to!string(total_size) ~ " Bytes y 0 Bytes de desperdicio.\n";
+            output ~= "    Heurística: " ~ to!string(global_types[name].size) ~ " Bytes y " ~ to!string(global_types[name].heuristic_wasted) ~ " Bytes desperdiciados.\n";
+            return output;
 
         default:
-            break;
+            throw new Exception("Error: Ocurrió un error inesperado.");
     }
 
 }         
 
 
-int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types)
+// =============================================================================================
+// Función: best_fit_heuristic_for_layout
+// =============================================================================================
+// Función que simula una especie de BestFit tradicional, este primero ordena los tipos según
+// su alineación, en caso de tener misma alineación, entonces ordena por tamaño. Se disponen en 
+// memoria comenzando entonces por los de mayor alineación, intentando hacer un BestFit cuando
+// se generan huecos en memoria; es decir, si un bloque se puede colocar en más de un hueco,
+// entonces se coloca en el que se encuentre más estrecho, el que deje un hueco de menor tamaño.
+// Esta heurística consigue la solución óptima en muchos casos, pero no es infalible, sin embargo,
+// es mucho más barata en términos de complejidad que la función que resuelve el problema el 
+// total de las veces. 
+// En el PDF técnico se habla de los dos enfoques y se entiende por qué decidí esta opción
+// =============================================================================================
+int[] best_fit_heuristic_for_layout(string[] types)
 {
     // 1) ordenar tipos
     TypeSum[] ordered;
@@ -234,7 +337,8 @@ int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types
 
     foreach(ts; ordered)
     {
-        size_t best_hole_index = -1;
+        size_t best_hole_index = size_t.max;
+        bool found = false;
         size_t best_fit_padding = size_t.max;
         size_t best_aligned_offset;
 
@@ -251,12 +355,13 @@ int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types
                 if (leftover < best_fit_padding) {
                     best_fit_padding = leftover;
                     best_hole_index = i;
+                    found = true;
                     best_aligned_offset = aligned;
                 }
             }
         }
 
-        if (best_hole_index != -1)
+        if (found)
         {
             result ~= PlacedType(ts.name, ts, best_aligned_offset);
 
@@ -289,24 +394,316 @@ int[] best_fit_heuristic_for_layout(string[] types, TypeSum[string] global_types
 
     size_t total_size = struct_size;
     size_t wasted_bytes = 0;
-    foreach (h; holes)
-        wasted_bytes += (h.end - h.start);
+    foreach (h; holes) wasted_bytes += (h.end - h.start);
     
     return [to!int(wasted_bytes), to!int(total_size), ordered[0].alignment];
 }
 
 
-void proccess_command(string command){}
+// =============================================================================================
+// Función: parse_entry
+// =============================================================================================
+// Función que parsea la entrada y hace el llamado de las funciones correspondientes según
+// comando. Esta también devuelve el estado de salida del programa, el mensaje de salida del
+// programa y el nuevo estado del diccionario de tipos general del programa.
+// =============================================================================================
+OutputData parse_entry(string[] entries_arr){
+    float result;
+    string result_str;
+
+    // Hacemos un toLower para permitir que el usuario escriba eval o eVal o EVAL 
+    // o cualquier combinación entre mayúsculas y minúsculas
+    switch(toLower(entries_arr[0])){
+        case "atomico":
+            
+            if(entries_arr.length != 4){
+                throw new Exception("Error: Mal uso del comando 'atómico'.");
+            }
+
+            int size = parse_to_int(entries_arr[2]);
+            int alignment = parse_to_int(entries_arr[3]);
+
+            create_atomic_type(entries_arr[1], size, alignment);
+
+            return OutputData(false, "Tipo atómico creado correctamente");
+        
+        case "union":
+
+            create_union_type(entries_arr[1], entries_arr[2..$]);
+            return OutputData(false, "Tipo union creado correctamente");
+
+        case "struct":
+
+            create_struct_type(entries_arr[1], entries_arr[2..$]);
+            return OutputData(false, "Tipo struct creado correctamente");
+
+        case "describir":
+
+            if(entries_arr.length != 2){
+                throw new Exception("Error: Mal uso del comando 'describir'.");
+            }
+            string description = get_type_description(entries_arr[1]);
+            return OutputData(false, description);
+
+        case "ayuda":
+            string[] help_array = [
+                "ATOMICO <nombre> <representación> <alineación> -> \n    Evalúa la expresión [expr] que debe está en forma prefija.\n",
+                "STRUCT <nombre> [<tipo>] -> \n    Define un registro cuyos campos son tipos existentes.\n",
+                "UNION <nombre> [<tipo>] -> \n    Define un registro variante cuyos campos comparten el mismo espacio.\n",
+                "DESCRIBIR <nombre> -> \n    Muestra el tamaño, alineación y bytes desperdiciados del tipo.\n",
+                "SALIR -> \n    Termina el programa."
+            ];
+            return OutputData(false, help_array[0] ~ help_array[1] ~ help_array[2] ~ help_array[3] ~ help_array[4]);
+        case "salir":
+            return OutputData(true, "Saliendo...");
+        default:
+            throw new Exception("Error: Comando desconocido.");
+    }
+}
+
 
 void main(){
 
-    TypeSum[string] types;
-    types = create_atomic_type("char", 3, 4, types);
-    types = create_atomic_type("int", 2, 3, types);
-    types = create_union_type("animal", ["int", "char"], types);
-    types = create_struct_type("vector", ["int", "char", "animal"], types);
+    while(true){
+        write("> ");
+        string entry = readln();
+        entry = entry[0..$-1];
+        // Se dividen los elementos enviados por medio de un espacio
+        string[] entries_arr = entry.split(" ");
 
-    get_type_description("animal", types);
-    get_type_description("vector", types);
+        if(entries_arr.length == 0){
+            writeln("Error: Debe ingresar un comando.");
+            continue;
+        }
 
+        // Utilizamos try catch para enviar excepciones y sean reconocidas en el catch sin tener que
+        // establecer métodos para salir de las funciones llamadas y demás.
+        try{
+            OutputData output = parse_entry(entries_arr);
+            writeln(output.output);
+            if(output.exit){
+                break;
+            }
+
+        } catch (Exception e){
+            writeln("Error: ", e.msg);
+        }
+    }
+}
+
+unittest {
+    import std.stdio;
+
+    // Limpiar diccionario para que las pruebas sean deterministas
+
+    // =============================================================
+    // parse_to_int
+    // =============================================================
+    assert(parse_to_int("10") == 10);
+
+    bool caught = false;
+    try { parse_to_int("-1"); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    caught = false;
+    try { parse_to_int("abc"); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    // =============================================================
+    // alignTo
+    // =============================================================
+    assert(alignTo(0, 4) == 0);
+    assert(alignTo(1, 4) == 4);
+    assert(alignTo(4, 4) == 4);
+    assert(alignTo(5, 4) == 8);
+
+    // =============================================================
+    // create_atomic_type
+    // =============================================================
+    create_atomic_type("u8", 1, 1);
+    assert("u8" in global_types);
+    assert(global_types["u8"].size == 1);
+    assert(global_types["u8"].alignment == 1);
+    assert(global_types["u8"].kind == TypeKind.Atomic);
+
+    caught = false;
+    try { create_atomic_type("u8", 1, 1); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    // =============================================================
+    // create_struct_type
+    // =============================================================
+
+    // Definir algunos tipos básicos para usarlos en structs
+    create_atomic_type("u16", 2, 2);
+    create_atomic_type("u32", 4, 4);
+
+    // Caso válido
+    create_struct_type("Punto", ["u16", "u16"]);
+    assert("Punto" in global_types);
+    assert(global_types["Punto"].kind == TypeKind.Struct);
+    assert(global_types["Punto"].types == ["u16", "u16"]);
+    assert(global_types["Punto"].size > 0);  // depende de tu heurística
+    assert(global_types["Punto"].heuristic_wasted >= 0);
+
+    // Caso: tipo ya existe
+    caught = false;
+    try { create_struct_type("Punto", ["u16", "u16"]); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    // Caso: tipo interno inexistente
+    caught = false;
+    try { create_struct_type("StructX", ["noexiste"]); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    // =============================================================
+    // create_union_type
+    // =============================================================
+
+    create_union_type("Numero", ["u8", "u32"]);
+    assert("Numero" in global_types);
+    assert(global_types["Numero"].kind == TypeKind.Union);
+    assert(global_types["Numero"].size == 4);        // max(u8=1, u32=4)
+    assert(global_types["Numero"].alignment == 4);   // mcm(1,4) = 4
+
+    // Crear unión inválida (tipo inexistente)
+    caught = false;
+    try { create_union_type("BadUnion", ["u999"]); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    // Crear unión repetida
+    caught = false;
+    try { create_union_type("Numero", ["u8"]); } catch (Exception e) { caught = true; }
+    assert(caught);
+
+    global_types.clear();
+
+    OutputData data = parse_entry(["atomico", "int", "2", "2"]);
+    assert(data.output == "Tipo atómico creado correctamente");
+
+    // ---- Caso: atómico repetido ----
+    caught = false;
+    try {
+        parse_entry(["atomico", "int", "2", "2"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: atómico inválido (tamaño no numérico) ----
+    caught = false;
+    try {
+        parse_entry(["atomico", "bad", "x", "1"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: struct válido ----
+    parse_entry(["atomico", "u8x", "6", "8"]);
+    parse_entry(["atomico", "u16x", "2", "4"]);
+    parse_entry(["atomico", "u9x", "2", "8"]);
+
+    auto out2 = parse_entry(["struct", "Pair", "u8x", "u16x", "u9x"]);
+    assert(out2.output == "Tipo struct creado correctamente");
+    assert("Pair" in global_types);
+    assert(global_types["Pair"].kind == TypeKind.Struct);
+
+    // ---- Caso: struct con tipo inexistente ----
+    caught = false;
+    try {
+        parse_entry(["struct", "BadStruct", "noexiste"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: struct repetido ----
+    caught = false;
+    try {
+        parse_entry(["struct", "Pair", "u8x", "u16x"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: unión válida ----
+    auto out3 = parse_entry(["union", "NumUnion", "u8x", "u16x"]);
+    assert(out3.output == "Tipo union creado correctamente");
+    assert("NumUnion" in global_types);
+    assert(global_types["NumUnion"].kind == TypeKind.Union);
+
+    // ---- Caso: unión con tipo inexistente ----
+    caught = false;
+    try {
+        parse_entry(["union", "BadUnion2", "foo999"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: unión repetida ----
+    caught = false;
+    try {
+        parse_entry(["union", "NumUnion", "u8x"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: comando inválido ----
+    caught = false;
+    try {
+        parse_entry(["banana", "x"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    // ---- Caso: argumentos insuficientes ----
+    caught = false;
+    try {
+        parse_entry(["atomico", "x"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+    assert(caught);
+
+    caught = false;
+    try {
+        parse_entry(["describir", "int"]);
+        parse_entry(["describir", "Pair"]);
+        parse_entry(["describir", "NumUnion"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+
+    assert(!caught);
+
+    caught = false;
+    try {
+        parse_entry(["describir", "NotCreatedType"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+
+    assert(caught);
+
+    // Comando desconocido
+    try {
+        parse_entry(["ComandoRaro"]);
+    } catch (Exception e) {
+        caught = true;
+    }
+
+    assert(caught);
+
+    out3 = parse_entry(["salir"]);
+    assert(out3.exit);
+
+    out3 = parse_entry(["ayuda"]);
+    assert(out3.output == "ATOMICO <nombre> <representación> <alineación> -> \n    Evalúa la expresión [expr] que debe está en forma prefija.\nSTRUCT <nombre> [<tipo>] -> \n    Define un registro cuyos campos son tipos existentes.\nUNION <nombre> [<tipo>] -> \n    Define un registro variante cuyos campos comparten el mismo espacio.\nDESCRIBIR <nombre> -> \n    Muestra el tamaño, alineación y bytes desperdiciados del tipo.\nSALIR -> \n    Termina el programa.");
+    
+
+    writeln("Todas las pruebas del sistema de tipos pasaron correctamente.");
 }
