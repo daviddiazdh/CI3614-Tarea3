@@ -449,9 +449,6 @@ HeuristicAnswer best_fit_heuristic_for_layout(string[] types)
         (a.alignment == b.alignment && a.size > b.size)
     );
 
-    // writeln("Este es ordered:");
-    // writeln(ordered);
-
     Hole[] holes;
     size_t struct_size = 0;
 
@@ -482,9 +479,6 @@ HeuristicAnswer best_fit_heuristic_for_layout(string[] types)
                 }
             }
         }
-        // writeln("Huecos: ");
-        // writeln(holes);
-        // writeln("Este es el best_hole_index: " ~ to!string(best_hole_index));
         if (found)
         {
             result ~= PlacedType(ts.name, ts, best_aligned_offset);
