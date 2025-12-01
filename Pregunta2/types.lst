@@ -22,7 +22,16 @@
        |    int size = 0;
        |    int alignment = 0;
        |    int heuristic_wasted = 0; // Exclusivo para caso de Struct
+       |    int[] memory = [];
        |    string[] types = []; // Es vacío exclusivamente cuando se trata de un tipo atómico 
+       |}
+       |
+       |struct HeuristicAnswer
+       |{
+       |    int wasted_bytes;
+       |    int total_size;
+       |    int alignment;
+       |    int[] memory = []; 
        |}
        |
        |TypeSum[string] global_types;
@@ -72,7 +81,7 @@
        |// sirve para saber la próxima posición de un tipo en memoria según alineación.
        |size_t alignTo(size_t x, size_t a)
        |{
-     13|    return ((x + a - 1) / a) * a;
+     18|    return ((x + a - 1) / a) * a;
        |}
        |
        |// Función que verifica que todos los tipos en una lista estén declarados previamente
@@ -104,7 +113,16 @@
       7|    new_type.name = name;
       7|    new_type.size = size;
       7|    new_type.alignment = alignment;
+       |
+      7|    int[] memory_arr;
+      7|    memory_arr.length = size;
+      7|    memory_arr[] = 1;
+      7|    new_type.memory = memory_arr;
+       |
       7|    global_types[name] = new_type;
+       |
+       |
+       |
       7|    return;
        |}
        |
@@ -133,12 +151,13 @@
       2|    new_type.name = name;
       2|    new_type.types = struct_types;
        |
-      2|    int[] result = best_fit_heuristic_for_layout(struct_types);
+      2|    HeuristicAnswer result = best_fit_heuristic_for_layout(struct_types);
        |
-      2|    new_type.size = result[1];
-      2|    new_type.heuristic_wasted = result[0];
+      2|    new_type.size = result.total_size;
+      2|    new_type.heuristic_wasted = result.wasted_bytes;
        |
-      2|    new_type.alignment = result[2];
+      2|    new_type.alignment = result.alignment;
+      2|    new_type.memory = result.memory;
        |
       2|    global_types[name] = new_type;
       2|    return;
@@ -177,6 +196,11 @@
        |
       2|    new_type.size = max_size;
        |
+      2|    int[] memory_arr;
+      2|    memory_arr.length = max_size;
+      2|    memory_arr[] = 1;
+      2|    new_type.memory = memory_arr;
+       |
        |    // Calcular la alineación, será el mínimo común múltiplo entre las alineaciones de los tipos internos
       2|    int union_lcm = global_types[union_types[0]].alignment;
      12|    foreach(type; union_types[1..$]){
@@ -208,7 +232,7 @@
        |// a través del uso de la técnica vista en la teoría de no empaquetado. Básicamente,
        |// coloca los bloques de tipo en el orden declarado, respetando su alineación.
        |// =============================================================================================
-       |int[] not_packed_method_for_layout(string[] types)
+       |HeuristicAnswer not_packed_method_for_layout(string[] types)
        |{
       1|    TypeSum[] ordered;
      15|    foreach(name; types) ordered ~= global_types[name];
@@ -234,9 +258,70 @@
       9|    foreach (h; holes)
       2|        wasted_bytes += (h.end - h.start);
        |    
-      1|    return [to!int(wasted_bytes), to!int(total_size)];
+      1|    int[] memoryMap;
+      1|    memoryMap.length = total_size;
+      1|    memoryMap[] = 0; // inicializar todo en 0
+       |
+     12|    foreach (p; result)
+       |    {
+      3|        size_t start = p.offset;
+      3|        size_t end   = p.offset + p.ts.size;
+       |
+       |        // Marcar bytes ocupados
+     26|        for (size_t i = start; i < end; i++)
+     10|            memoryMap[i] = 1;
+       |    }
+       |
+      1|    return HeuristicAnswer(to!int(wasted_bytes), to!int(total_size), 0, memoryMap);
        |
        |}  
+       |
+       |string get_memory_layout(int[] memory_arr){
+      5|    int i = 0;
+      5|    int index = 0;
+      5|    string memory_display = "";
+      5|    int size = memory_arr.length;
+      5|    int last_position = alignTo(size, 4);
+      5|    int max_index = 1;
+     13|    while(max_index < last_position)
+       |    {
+      8|        max_index *= 10;
+       |    }
+     85|    while(i % 4 != 0 || i < last_position)
+       |    {
+     60|        if(i % 4 == 0)
+       |        {
+     30|            int index_space = (index == 0) ? 1 : index;
+     15|            int counter = 0;
+     39|            while(index_space < max_index){
+     24|                index_space = index_space * 10;
+     24|                counter += 1;
+       |            }
+     15|            char[] spaced_index;
+     15|            spaced_index.length = counter;
+     15|            spaced_index[] = ' ';
+       |            
+     30|            memory_display ~= (i == 0) ? "      " ~ spaced_index ~ to!string(index) ~ " |" : "\n      " ~ spaced_index ~ to!string(index) ~ " |";
+     15|            index += 4;
+       |        }
+       |
+     60|        if(i >= size)
+       |        {
+     10|            memory_display ~= " 0 ";
+       |        } else{
+     50|            memory_display ~= " " ~ to!string(memory_arr[i]) ~ " ";
+       |        }
+       |
+     60|        if( (i + 1) % 4 == 0)
+       |        {
+     15|            memory_display ~= "|";
+       |        } 
+       |
+     60|        i += 1;
+       |    }
+      5|    return memory_display;
+       |}
+       |
        |
        |// =============================================================================================
        |// Función: get_type_description
@@ -259,44 +344,78 @@
       3|    string output = "";
       3|    switch (global_types[name].kind){
       1|        case TypeKind.Atomic:
-      1|            output ~= "El objeto " ~ name ~ " es de tipo atómico.\n";
-      1|            output ~= "Tiene las siguientes características:\n";
-      1|            output ~= "Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
-      1|            output ~= "Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
-      1|            output ~= "Cantidad de bytes desperdiciados en cualquier representación: 0B";
+      1|            output ~= "Descripción de " ~ name ~ ":\n";
+      1|            output ~= "    Tipo: Atómico.\n";
+      1|            output ~= "    Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
+      1|            output ~= "    Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
+       |            
+      1|            string memory_display = get_memory_layout(global_types[name].memory);
+      1|            output ~= "    Disposición de memoria: \n";
+      1|            output ~= "    =========================== \n";
+      1|            output ~= memory_display;
+      1|            output ~= "\n    =========================== \n";
+       |
+      1|            output ~= "    Desperdicio: 0B";
       1|            return output;
       1|        case TypeKind.Union:
-      1|            output ~= "El objeto '" ~ name ~ "' es de tipo union.\n";
-      1|            output ~= "Contenido: \n";
-      1|            output ~= "----------------------------------------\n";
+      1|            output ~= "Descripción de " ~ name ~ ":\n";
+      1|            output ~= "    Tipo: Unión.\n";
+      1|            output ~= "    Campos: \n";
       9|            foreach(type; global_types[name].types){
-      2|                output ~= "    " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
+      2|                output ~= "       " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
        |            }
-      1|            output ~= "----------------------------------------\n";
-      1|            output ~= "Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
-      1|            output ~= "Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
-      1|            output ~= "Cantidad de bytes desperdiciados: Depende del tipo a tiempo de ejecución\n";
+      1|            output ~= "    Tamaño: " ~ to!string(global_types[name].size) ~ " Bytes\n";
+      1|            output ~= "    Alineación: " ~ to!string(global_types[name].alignment) ~ "\n";
+      1|            output ~= "    Desperdicio: Depende del tipo a tiempo de ejecución\n";
       9|            foreach(type; global_types[name].types){
-      2|                output ~= "    Si es " ~ global_types[type].name ~ ", entonces " ~ to!string(global_types[name].size - global_types[type].size) ~ " Bytes.\n";
+      2|                output ~= "       " ~ global_types[type].name ~ " -> " ~ to!string(global_types[name].size - global_types[type].size) ~ " Bytes.\n";
        |            }
+       |
+      1|            string memory_display = get_memory_layout(global_types[name].memory);
+      1|            output ~= "    Disposición de memoria: \n";
+      1|            output ~= "    =========================== \n";
+      1|            output ~= memory_display;
+      1|            output ~= "\n    =========================== \n";
+       |
       1|            return output;
       1|        case TypeKind.Struct:
-      1|            output ~= "El objeto '" ~ name ~ "' es de tipo struct.\n";
-      1|            output ~= "Contenido: \n";
-      1|            output ~= "----------------------------------------\n";
+      1|            output ~= "Descripción de " ~ name ~ ":\n";
+      1|            output ~= "    Tipo: Struct.\n";
+      1|            output ~= "    Campos: \n";
       1|            int total_size = 0;
      12|            foreach(type; global_types[name].types){
-      3|                output ~= "    " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
+      3|                output ~= "        " ~ global_types[type].name ~ " | " ~ to!string(global_types[type].size) ~ " Bytes | " ~ to!string(global_types[type].alignment) ~ " de alineación.\n";
       3|                total_size += global_types[type].size;
        |            }
-      1|            output ~= "----------------------------------------\n";
-      1|            output ~= "Tamaño y desperdicio\n";
+      1|            output ~= "    Tamaño y desperdicio\n";
+      1|            HeuristicAnswer not_packet_result = not_packed_method_for_layout(global_types[name].types);
        |
-      1|            int[] not_packet_result = not_packed_method_for_layout(global_types[name].types);
+      1|            output ~= "    No empaquetado -- Tamaño: " ~ to!string(not_packet_result.total_size) ~ " Bytes\n    Desperdicio: " ~ to!string(not_packet_result.wasted_bytes) ~ " Bytes.\n";
+       |            
+      1|            string memory_display = get_memory_layout(not_packet_result.memory);
+      1|            output ~= "    Disposición de memoria: \n";
+      1|            output ~= "    =========================== \n";
+      1|            output ~= memory_display;
+      1|            output ~= "\n    =========================== \n";
        |
-      1|            output ~= "    No empaquetado: " ~ to!string(not_packet_result[1]) ~ " Bytes y " ~ to!string(not_packet_result[0]) ~ " Bytes de desperdicio.\n";
-      1|            output ~= "    Empaquetado: " ~ to!string(total_size) ~ " Bytes y 0 Bytes de desperdicio.\n";
-      1|            output ~= "    Heurística: " ~ to!string(global_types[name].size) ~ " Bytes y " ~ to!string(global_types[name].heuristic_wasted) ~ " Bytes desperdiciados.\n";
+      1|            output ~= "    Empaquetado -- Tamaño: " ~ to!string(total_size) ~ " Bytes\n    Desperdicio: 0 Bytes.\n";
+       |            
+      1|            int[] memory_arr;
+      1|            memory_arr.length = total_size;
+      1|            memory_arr[] = 1;
+      1|            memory_display = get_memory_layout(memory_arr);
+      1|            output ~= "    Disposición de memoria: \n";
+      1|            output ~= "    =========================== \n";
+      1|            output ~= memory_display;
+      1|            output ~= "\n    =========================== \n";
+       |            
+      1|            output ~= "    Heurística: " ~ to!string(global_types[name].size) ~ " Bytes y " ~ to!string(global_types[name].heuristic_wasted) ~ " Bytes desperdiciados.";
+      1|            memory_display = get_memory_layout(global_types[name].memory);
+      1|            output ~= "\n    Disposición de memoria: \n";
+      1|            output ~= "    =========================== \n";
+      1|            output ~= memory_display;
+      1|            output ~= "\n    =========================== \n";
+       |            
       1|            return output;
        |
 0000000|        default:
@@ -319,7 +438,7 @@
        |// total de las veces. 
        |// En el PDF técnico se habla de los dos enfoques y se entiende por qué decidí esta opción
        |// =============================================================================================
-       |int[] best_fit_heuristic_for_layout(string[] types)
+       |HeuristicAnswer best_fit_heuristic_for_layout(string[] types)
        |{
        |    // 1) ordenar tipos
       2|    TypeSum[] ordered;
@@ -330,6 +449,9 @@
      10|        (a.alignment == b.alignment && a.size > b.size)
        |    );
        |
+       |    // writeln("Este es ordered:");
+       |    // writeln(ordered);
+       |
       2|    Hole[] holes;
       2|    size_t struct_size = 0;
        |
@@ -337,7 +459,7 @@
        |
      21|    foreach(ts; ordered)
        |    {
-      5|        size_t best_hole_index = size_t.max;
+      5|        size_t best_hole_index = 0;
       5|        bool found = false;
       5|        size_t best_fit_padding = size_t.max;
       5|        size_t best_aligned_offset;
@@ -360,7 +482,9 @@
        |                }
        |            }
        |        }
-       |
+       |        // writeln("Huecos: ");
+       |        // writeln(holes);
+       |        // writeln("Este es el best_hole_index: " ~ to!string(best_hole_index));
       5|        if (found)
        |        {
 0000000|            result ~= PlacedType(ts.name, ts, best_aligned_offset);
@@ -376,7 +500,12 @@
 0000000|            if (best_aligned_offset + ts.size < h.end)
 0000000|                new_holes ~= Hole(best_aligned_offset + ts.size, h.end);
        |
-0000000|            holes[best_hole_index .. best_hole_index+1] = new_holes;
+0000000|            if(best_hole_index == 0 && holes.length == 1){
+0000000|                holes = new_holes;
+       |            } else{
+0000000|                holes[best_hole_index .. best_hole_index+1] = new_holes;
+       |            }
+       |            
        |        }
        |        else
        |        {
@@ -395,8 +524,22 @@
       2|    size_t total_size = struct_size;
       2|    size_t wasted_bytes = 0;
      14|    foreach (h; holes) wasted_bytes += (h.end - h.start);
+       |
+      2|    int[] memoryMap;
+      2|    memoryMap.length = total_size;
+      2|    memoryMap[] = 0; // inicializar todo en 0
+       |
+     21|    foreach (p; result)
+       |    {
+      5|        size_t start = p.offset;
+      5|        size_t end   = p.offset + p.ts.size;
+       |
+       |        // Marcar bytes ocupados
+     38|        for (size_t i = start; i < end; i++)
+     14|            memoryMap[i] = 1;
+       |    }
        |    
-      2|    return [to!int(wasted_bytes), to!int(total_size), ordered[0].alignment];
+      2|    return HeuristicAnswer(to!int(wasted_bytes), to!int(total_size), ordered[0].alignment, memoryMap);
        |}
        |
        |
@@ -707,4 +850,4 @@
        |
       1|    writeln("Todas las pruebas del sistema de tipos pasaron correctamente.");
        |}
-types.d is 89% covered
+types.d is 91% covered
